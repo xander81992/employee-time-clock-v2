@@ -19,6 +19,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -30,16 +31,21 @@ import { getFirebaseServices } from "@/lib/firebase";
 import { friendlyFirebaseError } from "@/lib/errors";
 import type { Employee, Shift } from "@/lib/types";
 import {
+  addDaysInputValue,
+  dateKeyFromTimestamp,
   dateRange,
   durationMinutes,
+  formatDateOnly,
   formatDateTime,
   formatDuration,
   hoursFromMinutes,
   monthStartInputValue,
-  todayInputValue
+  timestampToDateTimeLocalValue,
+  todayInputValue,
+  weekRangeSunday
 } from "@/lib/time";
 
-type Tab = "overview" | "employees" | "reports" | "qr";
+type Tab = "overview" | "employees" | "reports" | "weekly" | "qr";
 
 function mapEmployee(id: string, data: Record<string, unknown>): Employee {
   return {
@@ -82,6 +88,16 @@ function Dashboard({ user }: { user: User }) {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(new Date());
   const [kioskUrl, setKioskUrl] = useState("");
+
+  const [editingShift, setEditingShift] = useState<Shift | null>(null);
+  const [editTimeIn, setEditTimeIn] = useState("");
+  const [editTimeOut, setEditTimeOut] = useState("");
+  const [editBusy, setEditBusy] = useState(false);
+
+  const [weeklyEmployeeId, setWeeklyEmployeeId] = useState("");
+  const [weekDate, setWeekDate] = useState(todayInputValue());
+  const [weeklyShifts, setWeeklyShifts] = useState<Shift[]>([]);
+  const [weeklyBusy, setWeeklyBusy] = useState(false);
 
   useEffect(() => {
     setKioskUrl(
@@ -129,6 +145,12 @@ function Dashboard({ user }: { user: User }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!weeklyEmployeeId && employees.length > 0) {
+      setWeeklyEmployeeId(employees[0].id);
+    }
+  }, [employees, weeklyEmployeeId]);
+
   const activeEmployees = employees.filter((employee) => employee.active);
   const clockedInEmployees = employees.filter((employee) => employee.activeShiftId);
   const todayMinutes = todayShifts.reduce(
@@ -160,6 +182,34 @@ function Dashboard({ user }: { user: User }) {
     );
   }, [reportShifts, now]);
 
+  const selectedWeeklyEmployee = employees.find(
+    (employee) => employee.id === weeklyEmployeeId
+  );
+  const currentWeekRange = useMemo(
+    () => weekRangeSunday(weekDate || todayInputValue()),
+    [weekDate]
+  );
+
+  const weeklyDays = useMemo(() => {
+    return currentWeekRange.days.map((day) => {
+      const dayShifts = weeklyShifts.filter(
+        (shift) => dateKeyFromTimestamp(shift.timeIn) === day.dateKey
+      );
+      const minutes = dayShifts.reduce(
+        (sum, shift) => sum + durationMinutes(shift.timeIn, shift.timeOut, now),
+        0
+      );
+
+      return {
+        ...day,
+        shifts: dayShifts,
+        minutes
+      };
+    });
+  }, [currentWeekRange.days, weeklyShifts, now]);
+
+  const weeklyMinutes = weeklyDays.reduce((sum, day) => sum + day.minutes, 0);
+
   const loadReport = useCallback(async () => {
     setBusy(true);
     setError("");
@@ -184,6 +234,44 @@ function Dashboard({ user }: { user: User }) {
       setBusy(false);
     }
   }, [reportStart, reportEnd]);
+
+  const loadWeeklyView = useCallback(async () => {
+    if (!weeklyEmployeeId) {
+      setWeeklyShifts([]);
+      return;
+    }
+
+    setWeeklyBusy(true);
+    setError("");
+
+    try {
+      const { db } = getFirebaseServices();
+      const range = weekRangeSunday(weekDate || todayInputValue());
+      const weeklyQuery = query(
+        collection(db, "shifts"),
+        where("timeIn", ">=", Timestamp.fromDate(range.start)),
+        where("timeIn", "<=", Timestamp.fromDate(range.end)),
+        orderBy("timeIn", "asc")
+      );
+
+      const snapshot = await getDocs(weeklyQuery);
+      setWeeklyShifts(
+        snapshot.docs
+          .map((item) => mapShift(item.id, item.data()))
+          .filter((shift) => shift.employeeId === weeklyEmployeeId)
+      );
+    } catch (weeklyError) {
+      setError(friendlyFirebaseError(weeklyError));
+    } finally {
+      setWeeklyBusy(false);
+    }
+  }, [weekDate, weeklyEmployeeId]);
+
+  useEffect(() => {
+    if (tab === "weekly") {
+      void loadWeeklyView();
+    }
+  }, [tab, loadWeeklyView]);
 
   async function addEmployee(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -275,6 +363,115 @@ function Dashboard({ user }: { user: User }) {
     }
   }
 
+  function openShiftEditor(shift: Shift) {
+    setError("");
+    setMessage("");
+    setEditingShift(shift);
+    setEditTimeIn(timestampToDateTimeLocalValue(shift.timeIn));
+    setEditTimeOut(timestampToDateTimeLocalValue(shift.timeOut));
+  }
+
+  async function saveShiftEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingShift) return;
+
+    const timeInDate = new Date(editTimeIn);
+    const timeOutDate = editTimeOut ? new Date(editTimeOut) : null;
+
+    if (!editTimeIn || Number.isNaN(timeInDate.getTime())) {
+      setError("Enter a valid Time In value.");
+      return;
+    }
+
+    if (timeOutDate && Number.isNaN(timeOutDate.getTime())) {
+      setError("Enter a valid Time Out value.");
+      return;
+    }
+
+    if (timeOutDate && timeOutDate <= timeInDate) {
+      setError("Time Out must be later than Time In.");
+      return;
+    }
+
+    setEditBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const { db } = getFirebaseServices();
+      const shiftRef = doc(db, "shifts", editingShift.id);
+      const employeeRef = doc(db, "employees", editingShift.employeeId);
+      const desiredStatus = timeOutDate ? "CLOSED" : "OPEN";
+
+      await runTransaction(db, async (transaction) => {
+        const [shiftSnapshot, employeeSnapshot] = await Promise.all([
+          transaction.get(shiftRef),
+          transaction.get(employeeRef)
+        ]);
+
+        if (!shiftSnapshot.exists()) {
+          throw new Error("The shift record no longer exists.");
+        }
+
+        const employeeData = employeeSnapshot.exists()
+          ? employeeSnapshot.data()
+          : null;
+        const currentActiveShiftId = employeeData?.activeShiftId
+          ? String(employeeData.activeShiftId)
+          : null;
+
+        if (desiredStatus === "OPEN") {
+          if (!employeeSnapshot.exists()) {
+            throw new Error("The employee record no longer exists.");
+          }
+
+          if (currentActiveShiftId && currentActiveShiftId !== editingShift.id) {
+            throw new Error(
+              "This employee already has another open shift. Close that shift first."
+            );
+          }
+
+          transaction.update(employeeRef, {
+            activeShiftId: editingShift.id,
+            lastActionAt: Timestamp.fromDate(timeInDate)
+          });
+        } else if (
+          employeeSnapshot.exists() &&
+          currentActiveShiftId === editingShift.id &&
+          timeOutDate
+        ) {
+          transaction.update(employeeRef, {
+            activeShiftId: null,
+            lastActionAt: Timestamp.fromDate(timeOutDate)
+          });
+        }
+
+        transaction.update(shiftRef, {
+          timeIn: Timestamp.fromDate(timeInDate),
+          timeOut: timeOutDate ? Timestamp.fromDate(timeOutDate) : null,
+          status: desiredStatus,
+          updatedAt: serverTimestamp(),
+          editedAt: serverTimestamp(),
+          editedBy: user.uid
+        });
+      });
+
+      setEditingShift(null);
+      setMessage(`${editingShift.employeeName}'s shift was updated.`);
+
+      if (tab === "reports") {
+        await loadReport();
+      }
+      if (tab === "weekly") {
+        await loadWeeklyView();
+      }
+    } catch (editError) {
+      setError(friendlyFirebaseError(editError));
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
   async function exportExcel() {
     if (reportShifts.length === 0) {
       setError("Load a report before exporting to Excel.");
@@ -331,6 +528,51 @@ function Dashboard({ user }: { user: User }) {
     XLSX.writeFile(workbook, `employee-hours-${reportStart}-to-${reportEnd}.xlsx`);
   }
 
+  async function exportWeeklyExcel() {
+    if (!selectedWeeklyEmployee) {
+      setError("Choose an employee first.");
+      return;
+    }
+
+    const XLSX = await import("xlsx");
+    const dailyRows = weeklyDays.map((day) => ({
+      Day: day.weekday,
+      Date: day.dateKey,
+      Shifts: day.shifts.length,
+      "Total Time": formatDuration(day.minutes),
+      "Total Hours": hoursFromMinutes(day.minutes)
+    }));
+
+    const shiftRows = weeklyShifts.map((shift) => {
+      const minutes = durationMinutes(shift.timeIn, shift.timeOut, now);
+      return {
+        Employee: shift.employeeName,
+        "Employee Number": shift.employeeNumber,
+        "Time In": formatDateTime(shift.timeIn),
+        "Time Out": shift.status === "OPEN" ? "Still Clocked In" : formatDateTime(shift.timeOut),
+        Status: shift.status,
+        "Total Time": formatDuration(minutes),
+        "Total Hours": hoursFromMinutes(minutes)
+      };
+    });
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet(dailyRows),
+      "Sunday-Saturday"
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet(shiftRows),
+      "Shift Details"
+    );
+    XLSX.writeFile(
+      workbook,
+      `${selectedWeeklyEmployee.employeeNumber}-${currentWeekRange.startDateKey}-to-${currentWeekRange.endDateKey}.xlsx`
+    );
+  }
+
   async function logout() {
     const { auth } = getFirebaseServices();
     await signOut(auth);
@@ -340,6 +582,22 @@ function Dashboard({ user }: { user: User }) {
   function printQr() {
     window.print();
   }
+
+  function pageTitle() {
+    if (tab === "overview") return "Dashboard";
+    if (tab === "employees") return "Employee Management";
+    if (tab === "reports") return "Hours & Reports";
+    if (tab === "weekly") return "Weekly Employee Hours";
+    return "Station QR Code";
+  }
+
+  const editPreviewMinutes = useMemo(() => {
+    if (!editTimeIn) return 0;
+    const start = new Date(editTimeIn);
+    const end = editTimeOut ? new Date(editTimeOut) : now;
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+    return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+  }, [editTimeIn, editTimeOut, now]);
 
   return (
     <main className="admin-shell">
@@ -357,6 +615,7 @@ function Dashboard({ user }: { user: User }) {
             <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>Overview</button>
             <button className={tab === "employees" ? "active" : ""} onClick={() => setTab("employees")}>Employees</button>
             <button className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}>Reports</button>
+            <button className={tab === "weekly" ? "active" : ""} onClick={() => setTab("weekly")}>Weekly Hours</button>
             <button className={tab === "qr" ? "active" : ""} onClick={() => setTab("qr")}>Station QR Code</button>
           </nav>
         </div>
@@ -371,7 +630,7 @@ function Dashboard({ user }: { user: User }) {
         <header className="content-header">
           <div>
             <p className="eyebrow">EMPLOYEE ATTENDANCE</p>
-            <h1>{tab === "overview" ? "Dashboard" : tab === "employees" ? "Employee Management" : tab === "reports" ? "Hours & Reports" : "Station QR Code"}</h1>
+            <h1>{pageTitle()}</h1>
           </div>
           <a className="button secondary compact" href="/kiosk" target="_blank" rel="noreferrer">Open Clock</a>
         </header>
@@ -413,13 +672,13 @@ function Dashboard({ user }: { user: User }) {
             </section>
 
             <section className="panel">
-              <div className="panel-heading"><div><h2>Today&apos;s Activity</h2><p>Most recent attendance records.</p></div></div>
+              <div className="panel-heading"><div><h2>Today&apos;s Activity</h2><p>Most recent attendance records. Administrators can correct a shift.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th><th>Action</th></tr></thead>
                   <tbody>
                     {todayShifts.length === 0 ? (
-                      <tr><td colSpan={5} className="empty-cell">No shifts recorded today.</td></tr>
+                      <tr><td colSpan={6} className="empty-cell">No shifts recorded today.</td></tr>
                     ) : todayShifts.map((shift) => (
                       <tr key={shift.id}>
                         <td><strong>{shift.employeeName}</strong><small>#{shift.employeeNumber}</small></td>
@@ -427,6 +686,7 @@ function Dashboard({ user }: { user: User }) {
                         <td>{shift.status === "OPEN" ? "—" : formatDateTime(shift.timeOut)}</td>
                         <td>{formatDuration(durationMinutes(shift.timeIn, shift.timeOut, now))}</td>
                         <td><span className={`status-pill ${shift.status === "OPEN" ? "open" : "closed"}`}>{shift.status}</span></td>
+                        <td><button className="table-action" onClick={() => openShiftEditor(shift)}>Edit</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -456,6 +716,7 @@ function Dashboard({ user }: { user: User }) {
                     <div className="employee-main"><strong>{employee.name}</strong><span>Employee #{employee.employeeNumber}</span></div>
                     <span className={`status-pill ${employee.active ? "active" : "inactive"}`}>{employee.active ? "Active" : "Inactive"}</span>
                     <div className="row-actions">
+                      <button onClick={() => { setWeeklyEmployeeId(employee.id); setTab("weekly"); }}>Weekly Hours</button>
                       <button onClick={() => toggleEmployee(employee)}>{employee.active ? "Deactivate" : "Activate"}</button>
                       <button className="danger-link" onClick={() => removeEmployee(employee)}>Delete</button>
                     </div>
@@ -469,7 +730,7 @@ function Dashboard({ user }: { user: User }) {
         {tab === "reports" && (
           <>
             <section className="panel report-controls">
-              <div className="panel-heading"><div><h2>Attendance Report</h2><p>Select a date range, then calculate and export employee hours.</p></div></div>
+              <div className="panel-heading"><div><h2>Attendance Report</h2><p>Select a date range, calculate hours, edit records, and export to Excel.</p></div></div>
               <div className="report-form">
                 <label>Start date<input type="date" value={reportStart} onChange={(event) => setReportStart(event.target.value)} /></label>
                 <label>End date<input type="date" value={reportEnd} onChange={(event) => setReportEnd(event.target.value)} /></label>
@@ -488,13 +749,14 @@ function Dashboard({ user }: { user: User }) {
               <div className="panel-heading"><div><h2>Hours by Employee</h2><p>Calculated from recorded Time In and Time Out timestamps.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee #</th><th>Name</th><th>Shifts</th><th>Total Time</th><th>Total Hours</th></tr></thead>
+                  <thead><tr><th>Employee #</th><th>Name</th><th>Shifts</th><th>Total Time</th><th>Total Hours</th><th>Weekly View</th></tr></thead>
                   <tbody>
                     {reportSummary.length === 0 ? (
-                      <tr><td colSpan={5} className="empty-cell">Run a report to view employee totals.</td></tr>
+                      <tr><td colSpan={6} className="empty-cell">Run a report to view employee totals.</td></tr>
                     ) : reportSummary.map((item) => (
                       <tr key={item.employeeNumber}>
                         <td>{item.employeeNumber}</td><td><strong>{item.employeeName}</strong></td><td>{item.shifts}</td><td>{formatDuration(item.minutes)}</td><td>{hoursFromMinutes(item.minutes).toFixed(2)}</td>
+                        <td><button className="table-action" onClick={() => { setWeeklyEmployeeId(item.employeeNumber); setWeekDate(reportEnd); setTab("weekly"); }}>Open Week</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -503,13 +765,13 @@ function Dashboard({ user }: { user: User }) {
             </section>
 
             <section className="panel">
-              <div className="panel-heading"><div><h2>Shift Details</h2><p>Individual clock-in and clock-out records.</p></div></div>
+              <div className="panel-heading"><div><h2>Shift Details</h2><p>Use Edit to correct an employee&apos;s Time In or Time Out.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th><th>Action</th></tr></thead>
                   <tbody>
                     {reportShifts.length === 0 ? (
-                      <tr><td colSpan={5} className="empty-cell">No report data loaded.</td></tr>
+                      <tr><td colSpan={6} className="empty-cell">No report data loaded.</td></tr>
                     ) : reportShifts.map((shift) => (
                       <tr key={shift.id}>
                         <td><strong>{shift.employeeName}</strong><small>#{shift.employeeNumber}</small></td>
@@ -517,6 +779,100 @@ function Dashboard({ user }: { user: User }) {
                         <td>{shift.status === "OPEN" ? "Still Clocked In" : formatDateTime(shift.timeOut)}</td>
                         <td>{formatDuration(durationMinutes(shift.timeIn, shift.timeOut, now))}</td>
                         <td><span className={`status-pill ${shift.status === "OPEN" ? "open" : "closed"}`}>{shift.status}</span></td>
+                        <td><button className="table-action" onClick={() => openShiftEditor(shift)}>Edit</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </>
+        )}
+
+        {tab === "weekly" && (
+          <>
+            <section className="panel weekly-controls">
+              <div className="panel-heading">
+                <div>
+                  <h2>Sunday–Saturday Weekly View</h2>
+                  <p>Choose an employee and any date within the week.</p>
+                </div>
+              </div>
+              <div className="weekly-control-grid">
+                <label>
+                  Employee
+                  <select value={weeklyEmployeeId} onChange={(event) => setWeeklyEmployeeId(event.target.value)}>
+                    {employees.length === 0 && <option value="">No employees available</option>}
+                    {employees.map((employee) => (
+                      <option key={employee.id} value={employee.id}>
+                        {employee.name} — #{employee.employeeNumber}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Date within week
+                  <input type="date" value={weekDate} onChange={(event) => setWeekDate(event.target.value)} />
+                </label>
+                <div className="week-navigation">
+                  <button className="button secondary compact" onClick={() => setWeekDate(addDaysInputValue(currentWeekRange.start, -7))}>Previous</button>
+                  <button className="button secondary compact" onClick={() => setWeekDate(todayInputValue())}>Current Week</button>
+                  <button className="button secondary compact" onClick={() => setWeekDate(addDaysInputValue(currentWeekRange.start, 7))}>Next</button>
+                </div>
+                <button className="button primary" disabled={weeklyBusy || !weeklyEmployeeId} onClick={loadWeeklyView}>{weeklyBusy ? "Loading…" : "Refresh Week"}</button>
+                <button className="button secondary" disabled={!selectedWeeklyEmployee} onClick={exportWeeklyExcel}>Export Week</button>
+              </div>
+            </section>
+
+            <section className="metric-grid weekly-metrics">
+              <article className="metric-card"><span>Employee</span><strong className="metric-name">{selectedWeeklyEmployee?.name ?? "—"}</strong></article>
+              <article className="metric-card"><span>Week</span><strong className="metric-date">{formatDateOnly(currentWeekRange.start)} – {formatDateOnly(currentWeekRange.end)}</strong></article>
+              <article className="metric-card"><span>Shift Records</span><strong>{weeklyShifts.length}</strong></article>
+              <article className="metric-card"><span>Weekly Hours</span><strong>{hoursFromMinutes(weeklyMinutes).toFixed(2)}</strong></article>
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading"><div><h2>Daily Hours</h2><p>The workweek starts Sunday and ends Saturday.</p></div></div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Day</th><th>Date</th><th>Shifts</th><th>Total Time</th><th>Decimal Hours</th></tr></thead>
+                  <tbody>
+                    {weeklyDays.map((day) => (
+                      <tr key={day.dateKey}>
+                        <td><strong>{day.weekday}</strong></td>
+                        <td>{formatDateOnly(day.date)}</td>
+                        <td>{day.shifts.length}</td>
+                        <td>{formatDuration(day.minutes)}</td>
+                        <td>{hoursFromMinutes(day.minutes).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                    <tr className="total-row">
+                      <td colSpan={2}><strong>Weekly Total</strong></td>
+                      <td><strong>{weeklyShifts.length}</strong></td>
+                      <td><strong>{formatDuration(weeklyMinutes)}</strong></td>
+                      <td><strong>{hoursFromMinutes(weeklyMinutes).toFixed(2)}</strong></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading"><div><h2>Weekly Shift Details</h2><p>Edit any shift directly from this weekly page.</p></div></div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Day</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th><th>Action</th></tr></thead>
+                  <tbody>
+                    {weeklyShifts.length === 0 ? (
+                      <tr><td colSpan={6} className="empty-cell">No shifts found for this employee during the selected week.</td></tr>
+                    ) : weeklyShifts.map((shift) => (
+                      <tr key={shift.id}>
+                        <td>{dateKeyFromTimestamp(shift.timeIn)}</td>
+                        <td>{formatDateTime(shift.timeIn)}</td>
+                        <td>{shift.status === "OPEN" ? "Still Clocked In" : formatDateTime(shift.timeOut)}</td>
+                        <td>{formatDuration(durationMinutes(shift.timeIn, shift.timeOut, now))}</td>
+                        <td><span className={`status-pill ${shift.status === "OPEN" ? "open" : "closed"}`}>{shift.status}</span></td>
+                        <td><button className="table-action" onClick={() => openShiftEditor(shift)}>Edit</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -546,6 +902,44 @@ function Dashboard({ user }: { user: User }) {
           </section>
         )}
       </section>
+
+      {editingShift && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !editBusy && setEditingShift(null)}>
+          <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="edit-shift-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">EDIT ATTENDANCE</p>
+                <h2 id="edit-shift-title">{editingShift.employeeName}</h2>
+                <p>Employee #{editingShift.employeeNumber}</p>
+              </div>
+              <button className="modal-close" type="button" onClick={() => setEditingShift(null)} aria-label="Close">×</button>
+            </div>
+
+            <form className="edit-shift-form" onSubmit={saveShiftEdit}>
+              <label>
+                Time In
+                <input type="datetime-local" required value={editTimeIn} onChange={(event) => setEditTimeIn(event.target.value)} />
+              </label>
+              <label>
+                Time Out
+                <input type="datetime-local" value={editTimeOut} onChange={(event) => setEditTimeOut(event.target.value)} />
+              </label>
+
+              <div className="edit-preview">
+                <span>Calculated duration</span>
+                <strong>{formatDuration(editPreviewMinutes)} ({hoursFromMinutes(editPreviewMinutes).toFixed(2)} hours)</strong>
+              </div>
+
+              <p className="form-note">Leave Time Out blank only when the employee should remain clocked in. Saving a Time Out closes the shift automatically.</p>
+
+              <div className="modal-actions">
+                <button className="button secondary" type="button" disabled={editBusy} onClick={() => setEditingShift(null)}>Cancel</button>
+                <button className="button primary" type="submit" disabled={editBusy}>{editBusy ? "Updating…" : "Update Shift"}</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
