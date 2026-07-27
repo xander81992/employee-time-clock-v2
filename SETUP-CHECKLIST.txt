@@ -1,0 +1,19 @@
+EMPLOYEE TIME CLOCK — SETUP CHECKLIST
+
+[ ] Firebase Web App exists
+[ ] Firestore database created
+[ ] Email/Password Authentication enabled
+[ ] Anonymous Authentication enabled
+[ ] Admin user created in Authentication
+[ ] admins/{USER_UID} document created with role = admin
+[ ] firestore.rules copied and published
+[ ] Seven NEXT_PUBLIC variables added to Vercel
+[ ] No Firebase Admin private key variables added
+[ ] Vercel Root Directory points to the folder containing package.json
+[ ] Vercel domain added to Firebase Authorized domains
+[ ] New Vercel deployment completed
+[ ] Admin login tested
+[ ] Employee added
+[ ] Time In tested
+[ ] Time Out tested
+[ ] Excel report tested

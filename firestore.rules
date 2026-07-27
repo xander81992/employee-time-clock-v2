@@ -1,0 +1,56 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == "admin";
+    }
+
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    match /employees/{employeeId} {
+      allow list: if isAdmin();
+      allow get: if signedIn();
+      allow create, delete: if isAdmin();
+
+      allow update: if isAdmin()
+        || (signedIn()
+          && request.resource.data.diff(resource.data).changedKeys()
+            .hasOnly(["activeShiftId", "lastActionAt"])
+          && request.resource.data.employeeNumber == resource.data.employeeNumber
+          && request.resource.data.name == resource.data.name
+          && request.resource.data.active == resource.data.active);
+    }
+
+    match /shifts/{shiftId} {
+      allow list: if isAdmin();
+      allow get: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.employeeId is string
+        && request.resource.data.employeeName is string
+        && request.resource.data.employeeNumber is string
+        && request.resource.data.status == "OPEN"
+        && request.resource.data.kioskUserId == request.auth.uid;
+
+      allow update: if isAdmin()
+        || (signedIn()
+          && resource.data.status == "OPEN"
+          && request.resource.data.status == "CLOSED"
+          && request.resource.data.diff(resource.data).changedKeys()
+            .hasOnly(["status", "timeOut", "updatedAt"]));
+
+      allow delete: if isAdmin();
+    }
+  }
+}
