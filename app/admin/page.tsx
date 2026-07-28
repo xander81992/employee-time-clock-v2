@@ -42,6 +42,9 @@ import {
   monthStartInputValue,
   timestampToDateTimeLocalValue,
   todayInputValue,
+  netWorkMinutes,
+  workDurationMinutes,
+  WORK_LUNCH_BREAK_MINUTES,
   weekRangeSunday
 } from "@/lib/time";
 
@@ -103,7 +106,13 @@ function entryLabel(entryType: EntryType): string {
 
 function entryMinutes(shift: Shift, now = new Date()): number {
   if (shift.entryType !== "WORK") return Math.max(0, shift.paidMinutes);
-  return durationMinutes(shift.timeIn, shift.timeOut, now);
+  return workDurationMinutes(shift.timeIn, shift.timeOut, now);
+}
+
+function lunchDeductionMinutes(shift: Shift, now = new Date()): number {
+  if (shift.entryType !== "WORK") return 0;
+  const grossMinutes = durationMinutes(shift.timeIn, shift.timeOut, now);
+  return Math.min(WORK_LUNCH_BREAK_MINUTES, grossMinutes);
 }
 
 function dateTimeFromParts(dateValue: string, timeValue: string): Date {
@@ -732,6 +741,11 @@ function Dashboard({ user }: { user: User }) {
     const XLSX = await import("xlsx");
     const detailRows = reportShifts.map((shift) => {
       const minutes = entryMinutes(shift, now);
+      const grossWorkMinutes =
+        shift.entryType === "WORK"
+          ? durationMinutes(shift.timeIn, shift.timeOut, now)
+          : 0;
+      const lunchMinutes = lunchDeductionMinutes(shift, now);
       return {
         "Employee Number": shift.employeeNumber,
         "Employee Name": shift.employeeName,
@@ -746,8 +760,10 @@ function Dashboard({ user }: { user: User }) {
               : formatDateTime(shift.timeOut),
         Status: shift.status,
         Note: shift.note,
-        "Total Minutes": minutes,
-        "Total Hours": hoursFromMinutes(minutes)
+        "Gross Work Minutes": shift.entryType === "WORK" ? grossWorkMinutes : "",
+        "Lunch Deduction Minutes": shift.entryType === "WORK" ? lunchMinutes : "",
+        "Net Total Minutes": minutes,
+        "Net Total Hours": hoursFromMinutes(minutes)
       };
     });
 
@@ -755,7 +771,7 @@ function Dashboard({ user }: { user: User }) {
       "Employee Number": item.employeeNumber,
       "Employee Name": item.employeeName,
       Entries: item.entries,
-      "Work Hours": hoursFromMinutes(item.workMinutes),
+      "Net Work Hours": hoursFromMinutes(item.workMinutes),
       "Vacation Hours": hoursFromMinutes(item.vacationMinutes),
       "Sick Hours": hoursFromMinutes(item.sickMinutes),
       "Total Hours": hoursFromMinutes(item.totalMinutes)
@@ -774,8 +790,10 @@ function Dashboard({ user }: { user: User }) {
       { wch: 24 },
       { wch: 12 },
       { wch: 30 },
-      { wch: 15 },
-      { wch: 14 }
+      { wch: 20 },
+      { wch: 24 },
+      { wch: 18 },
+      { wch: 16 }
     ];
     summarySheet["!cols"] = [
       { wch: 18 },
@@ -802,7 +820,13 @@ function Dashboard({ user }: { user: User }) {
     const dailyRows = weeklyDays.map((day) => ({
       Day: day.weekday,
       Date: day.dateKey,
-      "Work Hours": hoursFromMinutes(day.workMinutes),
+      "Lunch Deduction Hours": hoursFromMinutes(
+        day.shifts.reduce(
+          (sum, shift) => sum + lunchDeductionMinutes(shift, now),
+          0
+        )
+      ),
+      "Net Work Hours": hoursFromMinutes(day.workMinutes),
       "Vacation Hours": hoursFromMinutes(day.vacationMinutes),
       "Sick Hours": hoursFromMinutes(day.sickMinutes),
       "Total Hours": hoursFromMinutes(day.minutes)
@@ -810,6 +834,11 @@ function Dashboard({ user }: { user: User }) {
 
     const shiftRows = weeklyShifts.map((shift) => {
       const minutes = entryMinutes(shift, now);
+      const grossWorkMinutes =
+        shift.entryType === "WORK"
+          ? durationMinutes(shift.timeIn, shift.timeOut, now)
+          : 0;
+      const lunchMinutes = lunchDeductionMinutes(shift, now);
       return {
         Employee: shift.employeeName,
         "Employee Number": shift.employeeNumber,
@@ -823,8 +852,12 @@ function Dashboard({ user }: { user: User }) {
               : formatDateTime(shift.timeOut)
             : "",
         Note: shift.note,
-        "Total Time": formatDuration(minutes),
-        "Total Hours": hoursFromMinutes(minutes)
+        "Gross Work Hours":
+          shift.entryType === "WORK" ? hoursFromMinutes(grossWorkMinutes) : "",
+        "Lunch Deduction Hours":
+          shift.entryType === "WORK" ? hoursFromMinutes(lunchMinutes) : "",
+        "Net Time": formatDuration(minutes),
+        "Net Hours": hoursFromMinutes(minutes)
       };
     });
 
@@ -873,7 +906,11 @@ function Dashboard({ user }: { user: User }) {
     const start = new Date(editTimeIn);
     const end = editTimeOut ? new Date(editTimeOut) : now;
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
-    return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+    const grossMinutes = Math.max(
+      0,
+      Math.round((end.getTime() - start.getTime()) / 60000)
+    );
+    return netWorkMinutes(grossMinutes);
   }, [editEntryType, editPaidHours, editTimeIn, editTimeOut, now]);
 
   return (
@@ -928,7 +965,7 @@ function Dashboard({ user }: { user: User }) {
               <article className="metric-card"><span>Active Employees</span><strong>{activeEmployees.length}</strong></article>
               <article className="metric-card"><span>Currently Clocked In</span><strong>{clockedInEmployees.length}</strong></article>
               <article className="metric-card"><span>Entries Today</span><strong>{todayShifts.length}</strong></article>
-              <article className="metric-card"><span>Total Hours Today</span><strong>{hoursFromMinutes(todayMinutes).toFixed(2)}</strong></article>
+              <article className="metric-card"><span>Net Hours Today</span><strong>{hoursFromMinutes(todayMinutes).toFixed(2)}</strong></article>
             </section>
 
             <section className="panel">
@@ -956,10 +993,10 @@ function Dashboard({ user }: { user: User }) {
             </section>
 
             <section className="panel">
-              <div className="panel-heading"><div><h2>Today&apos;s Timecard</h2><p>Work, vacation, and sick entries recorded today.</p></div></div>
+              <div className="panel-heading"><div><h2>Today&apos;s Timecard</h2><p>Work hours shown are net of the automatic 30-minute unpaid lunch deduction.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee</th><th>Type</th><th>Time In</th><th>Time Out</th><th>Hours</th><th>Status</th><th>Action</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Type</th><th>Time In</th><th>Time Out</th><th>Net Hours</th><th>Status</th><th>Action</th></tr></thead>
                   <tbody>
                     {todayShifts.length === 0 ? (
                       <tr><td colSpan={7} className="empty-cell">No timecard entries recorded today.</td></tr>
@@ -1028,14 +1065,14 @@ function Dashboard({ user }: { user: User }) {
             <section className="metric-grid report-metrics">
               <article className="metric-card"><span>Employees</span><strong>{reportSummary.length}</strong></article>
               <article className="metric-card"><span>Timecard Entries</span><strong>{reportShifts.length}</strong></article>
-              <article className="metric-card"><span>Total Hours</span><strong>{hoursFromMinutes(reportSummary.reduce((sum, item) => sum + item.totalMinutes, 0)).toFixed(2)}</strong></article>
+              <article className="metric-card"><span>Net Total Hours</span><strong>{hoursFromMinutes(reportSummary.reduce((sum, item) => sum + item.totalMinutes, 0)).toFixed(2)}</strong></article>
             </section>
 
             <section className="panel">
               <div className="panel-heading"><div><h2>Hours by Employee</h2><p>Work hours and credited vacation or sick hours.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee</th><th>Entries</th><th>Work</th><th>Vacation</th><th>Sick</th><th>Total</th><th>Timecard</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Entries</th><th>Net Work</th><th>Vacation</th><th>Sick</th><th>Total</th><th>Timecard</th></tr></thead>
                   <tbody>
                     {reportSummary.length === 0 ? (
                       <tr><td colSpan={7} className="empty-cell">Run a report to view employee totals.</td></tr>
@@ -1056,10 +1093,10 @@ function Dashboard({ user }: { user: User }) {
             </section>
 
             <section className="panel">
-              <div className="panel-heading"><div><h2>Timecard Details</h2><p>Edit work times, vacation, or sick entries.</p></div></div>
+              <div className="panel-heading"><div><h2>Timecard Details</h2><p>Work totals automatically exclude a 30-minute unpaid lunch break.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee</th><th>Date</th><th>Type</th><th>Time In</th><th>Time Out</th><th>Hours</th><th>Note</th><th>Action</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Date</th><th>Type</th><th>Time In</th><th>Time Out</th><th>Net Hours</th><th>Note</th><th>Action</th></tr></thead>
                   <tbody>
                     {reportShifts.length === 0 ? (
                       <tr><td colSpan={8} className="empty-cell">No report data loaded.</td></tr>
@@ -1120,16 +1157,16 @@ function Dashboard({ user }: { user: User }) {
             <section className="metric-grid weekly-metrics">
               <article className="metric-card"><span>Employee</span><strong className="metric-name">{selectedWeeklyEmployee?.name ?? "—"}</strong></article>
               <article className="metric-card"><span>Week</span><strong className="metric-date">{formatDateOnly(currentWeekRange.start)} – {formatDateOnly(currentWeekRange.end)}</strong></article>
-              <article className="metric-card"><span>Work Hours</span><strong>{hoursFromMinutes(weeklyWorkMinutes).toFixed(2)}</strong></article>
+              <article className="metric-card"><span>Net Work Hours</span><strong>{hoursFromMinutes(weeklyWorkMinutes).toFixed(2)}</strong></article>
               <article className="metric-card"><span>Vacation / Sick</span><strong>{hoursFromMinutes(weeklyVacationMinutes + weeklySickMinutes).toFixed(2)}</strong></article>
-              <article className="metric-card"><span>Total Hours</span><strong>{hoursFromMinutes(weeklyMinutes).toFixed(2)}</strong></article>
+              <article className="metric-card"><span>Net Total Hours</span><strong>{hoursFromMinutes(weeklyMinutes).toFixed(2)}</strong></article>
             </section>
 
             <section className="panel">
-              <div className="panel-heading"><div><h2>Daily Timecard</h2><p>The workweek starts Sunday and ends Saturday.</p></div></div>
+              <div className="panel-heading"><div><h2>Daily Timecard</h2><p>Sunday–Saturday. Work hours are shown after the automatic 30-minute lunch deduction.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Day</th><th>Date</th><th>Work</th><th>Vacation</th><th>Sick</th><th>Total</th><th>Action</th></tr></thead>
+                  <thead><tr><th>Day</th><th>Date</th><th>Net Work</th><th>Vacation</th><th>Sick</th><th>Total</th><th>Action</th></tr></thead>
                   <tbody>
                     {weeklyDays.map((day) => (
                       <tr key={day.dateKey}>
@@ -1156,10 +1193,10 @@ function Dashboard({ user }: { user: User }) {
             </section>
 
             <section className="panel">
-              <div className="panel-heading"><div><h2>Timecard Entry Details</h2><p>Edit or delete any entry directly from this page.</p></div></div>
+              <div className="panel-heading"><div><h2>Timecard Entry Details</h2><p>Work totals shown below automatically exclude a 30-minute unpaid lunch break.</p></div></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Date</th><th>Type</th><th>Time In</th><th>Time Out</th><th>Hours</th><th>Note</th><th>Action</th></tr></thead>
+                  <thead><tr><th>Date</th><th>Type</th><th>Time In</th><th>Time Out</th><th>Net Hours</th><th>Note</th><th>Action</th></tr></thead>
                   <tbody>
                     {weeklyShifts.length === 0 ? (
                       <tr><td colSpan={7} className="empty-cell">No timecard entries found for this employee during the selected week.</td></tr>
@@ -1244,7 +1281,7 @@ function Dashboard({ user }: { user: User }) {
                 <div className="form-grid two">
                   <label>Start time<input type="time" required value={manualStartTime} onChange={(event) => setManualStartTime(event.target.value)} /></label>
                   <label>End time<input type="time" required value={manualEndTime} onChange={(event) => setManualEndTime(event.target.value)} /></label>
-                  <small className="grid-note">If the end time is earlier than the start time, it will be recorded as the following day.</small>
+                  <small className="grid-note">If the end time is earlier than the start time, it will be recorded as the following day. A 30-minute unpaid lunch is deducted automatically from every Work entry.</small>
                 </div>
               ) : (
                 <label>
@@ -1320,12 +1357,12 @@ function Dashboard({ user }: { user: User }) {
               </label>
 
               <div className="edit-preview">
-                <span>Calculated total</span>
+                <span>{editEntryType === "WORK" ? "Net total after lunch" : "Calculated total"}</span>
                 <strong>{formatDuration(editPreviewMinutes)} ({hoursFromMinutes(editPreviewMinutes).toFixed(2)} hours)</strong>
               </div>
 
               {editEntryType === "WORK" && (
-                <p className="form-note">Leave Time Out blank only when the employee should remain clocked in. Saving a Time Out closes the shift automatically.</p>
+                <p className="form-note">Leave Time Out blank only when the employee should remain clocked in. Work totals automatically exclude a 30-minute unpaid lunch break.</p>
               )}
 
               <div className="modal-actions split-actions">
