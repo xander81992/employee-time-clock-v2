@@ -36,16 +36,23 @@ service cloud.firestore {
       allow list: if isAdmin();
       allow get: if signedIn();
 
-      allow create: if signedIn()
-        && request.resource.data.employeeId is string
-        && request.resource.data.employeeName is string
-        && request.resource.data.employeeNumber is string
-        && request.resource.data.status == "OPEN"
-        && request.resource.data.kioskUserId == request.auth.uid;
+      // Administrators can add manual work, vacation, and sick entries.
+      // Anonymous kiosk users can only create an open WORK shift for themselves.
+      allow create: if isAdmin()
+        || (signedIn()
+          && request.resource.data.employeeId is string
+          && request.resource.data.employeeName is string
+          && request.resource.data.employeeNumber is string
+          && request.resource.data.status == "OPEN"
+          && request.resource.data.entryType == "WORK"
+          && request.resource.data.source == "KIOSK"
+          && request.resource.data.kioskUserId == request.auth.uid);
 
       allow update: if isAdmin()
         || (signedIn()
           && resource.data.status == "OPEN"
+          && (!("entryType" in resource.data) || resource.data.entryType == "WORK")
+          && (!("source" in resource.data) || resource.data.source == "KIOSK")
           && request.resource.data.status == "CLOSED"
           && request.resource.data.diff(resource.data).changedKeys()
             .hasOnly(["status", "timeOut", "updatedAt"]));
