@@ -1109,3 +1109,119 @@ select:focus {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Timecard manual entries, vacation, and sick records */
+.content-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid #cfd8e8;
+  border-radius: 12px;
+  padding: 12px 14px;
+  color: var(--text);
+  background: white;
+  outline: none;
+  font: inherit;
+  line-height: 1.45;
+}
+
+textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(40, 89, 223, 0.11);
+}
+
+.form-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.form-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.entry-type-pill {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.entry-type-pill.work {
+  color: #2859df;
+  background: #eaf0ff;
+}
+
+.entry-type-pill.vacation {
+  color: #7b4b00;
+  background: #fff3d6;
+}
+
+.entry-type-pill.sick {
+  color: #a02e3b;
+  background: #ffe9ed;
+}
+
+.note-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.split-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.split-actions > div {
+  display: flex;
+  gap: 10px;
+}
+
+.danger-button {
+  color: var(--danger);
+  border: 1px solid #ffd1d8;
+  background: var(--danger-soft);
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #ffe3e8;
+}
+
+.edit-shift-form label small {
+  margin-top: 0;
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .content-header-actions,
+  .content-header-actions .button {
+    width: 100%;
+  }
+
+  .form-grid.two {
+    grid-template-columns: 1fr;
+  }
+
+  .split-actions,
+  .split-actions > div {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 1fr;
+  }
+}
+
+.grid-note {
+  grid-column: 1 / -1;
+  margin-top: -4px;
+}
