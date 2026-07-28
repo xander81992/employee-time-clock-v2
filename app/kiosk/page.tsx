@@ -143,9 +143,13 @@ export default function KioskPage() {
             employeeId: employeeNumber,
             employeeNumber,
             employeeName: name,
+            entryType: "WORK",
             status: "OPEN",
             timeIn: serverTimestamp(),
             timeOut: null,
+            paidMinutes: 0,
+            note: "",
+            source: "KIOSK",
             kioskUserId: firebaseUser.uid,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp()
