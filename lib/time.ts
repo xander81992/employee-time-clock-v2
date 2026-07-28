@@ -1,6 +1,7 @@
 import type { Timestamp } from "firebase/firestore";
 
 export const REPORT_TIME_ZONE = "America/Toronto";
+export const WORK_LUNCH_BREAK_MINUTES = 30;
 
 export function timestampToDate(value: Timestamp | null | undefined): Date | null {
   return value?.toDate ? value.toDate() : null;
@@ -51,6 +52,19 @@ export function durationMinutes(
 
   const end = timestampToDate(timeOut) ?? now;
   return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+}
+
+export function netWorkMinutes(grossMinutes: number): number {
+  const safeGrossMinutes = Math.max(0, Math.round(grossMinutes));
+  return Math.max(0, safeGrossMinutes - WORK_LUNCH_BREAK_MINUTES);
+}
+
+export function workDurationMinutes(
+  timeIn: Timestamp | null | undefined,
+  timeOut: Timestamp | null | undefined,
+  now = new Date()
+): number {
+  return netWorkMinutes(durationMinutes(timeIn, timeOut, now));
 }
 
 export function hoursFromMinutes(minutes: number): number {
