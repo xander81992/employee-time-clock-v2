@@ -48,11 +48,16 @@ service cloud.firestore {
           && request.resource.data.source == "KIOSK"
           && request.resource.data.kioskUserId == request.auth.uid);
 
+      // A kiosk may close the employee's currently linked open WORK shift.
+      // This also supports legacy or administrator-corrected shifts whose source
+      // is not KIOSK, including shifts that continue past midnight.
       allow update: if isAdmin()
         || (signedIn()
           && resource.data.status == "OPEN"
           && (!("entryType" in resource.data) || resource.data.entryType == "WORK")
-          && (!("source" in resource.data) || resource.data.source == "KIOSK")
+          && resource.data.employeeId is string
+          && exists(/databases/$(database)/documents/employees/$(resource.data.employeeId))
+          && get(/databases/$(database)/documents/employees/$(resource.data.employeeId)).data.activeShiftId == shiftId
           && request.resource.data.status == "CLOSED"
           && request.resource.data.diff(resource.data).changedKeys()
             .hasOnly(["status", "timeOut", "updatedAt"]));
